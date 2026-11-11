@@ -1,2 +1,4 @@
 kaggle>=1.6.0
+six>=1.16.0
+pyyaml>=6.0
 pyTelegramBotAPI>=4.14.0
