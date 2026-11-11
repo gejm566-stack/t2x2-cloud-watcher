@@ -177,15 +177,74 @@ def main():
         curr_ld = os.environ.get("LD_LIBRARY_PATH", "")
         os.environ["LD_LIBRARY_PATH"] = ":".join(cuda_paths) + (":" + curr_ld if curr_ld else "")
 
+    import re
+
+    def _cleanup_vod_intermediates(vod_ws: Path) -> None:
+        if not vod_ws.exists():
+            return
+        for pat in ("vod*", "audio*"):
+            for fp in vod_ws.glob(pat):
+                if fp.is_file():
+                    fp.unlink(missing_ok=True)
+        for sub in ("shorts/raw", "shorts/final", "shorts/subtitled", "long_blocks", "long_cuts"):
+            d = vod_ws / sub
+            if d.exists():
+                shutil.rmtree(d, ignore_errors=True)
+
+    url_list = [u.strip() for u in re.split(r"[\s,;]+", str(url or "")) if u.strip()] or [str(url)]
+    proc_returncode = 0
+
     if mode == "shorts":
-        cmd = [sys.executable, "pipeline_shorts.py", "--url", url, "--interval-minutes", str(interval), "--skip-subtitles"]
+        ready_dir = working_dir / "ready"
+        for idx, cur_url in enumerate(url_list, 1):
+            before_names = {p.name for p in ready_dir.glob("*.mp4")} if ready_dir.exists() else set()
+            m_vod = re.search(r"(\d{6,})", cur_url)
+            vod_tag = m_vod.group(1) if m_vod else f"job{idx}"
+
+            if len(url_list) > 1:
+                notify_telegram(f"🎬 [{idx}/{len(url_list)}] Нарезаю Shorts ({brand}): {cur_url}")
+
+            cmd = [
+                sys.executable, "pipeline_shorts.py",
+                "--url", cur_url,
+                "--interval-minutes", str(interval),
+                "--skip-subtitles",
+                "--min-score", "6.5",
+                "--max-clips", "15",
+            ]
+            if len(url_list) > 1:
+                cmd.append("--skip-vision")
+
+            print(f"\n🎬 [{idx}/{len(url_list)}] Запуск команды: {' '.join(cmd)}")
+            cur_proc = subprocess.run(cmd, env=os.environ)
+            if cur_proc.returncode != 0:
+                proc_returncode = cur_proc.returncode
+
+            if len(url_list) > 1 and ready_dir.exists():
+                for mp4 in sorted(ready_dir.glob("*.mp4")):
+                    if mp4.name in before_names or mp4.name.startswith(f"v{vod_tag}_"):
+                        continue
+                    old_stem = mp4.stem
+                    new_stem = f"v{vod_tag}_{old_stem}"
+                    mp4.rename(ready_dir / f"{new_stem}.mp4")
+                    for mdir_name in ("metadata", "shorts_metadata"):
+                        old_meta = working_dir / mdir_name / f"{old_stem}.json"
+                        if old_meta.exists():
+                            old_meta.rename(working_dir / mdir_name / f"{new_stem}.json")
+
+            _cleanup_vod_intermediates(working_dir / "twitch_work" / f"v{vod_tag}")
     else:
-        cmd = [sys.executable, "pipeline_long.py", "--url", url, "--interval-minutes", str(interval)]
+        cmd = [sys.executable, "pipeline_long.py", "--url", url_list[0], "--interval-minutes", str(interval)]
         if mode == "both":
             cmd.append("--with-shorts")
-
-    print(f"\n🎬 Запуск команды: {' '.join(cmd)}")
-    proc = subprocess.run(cmd, env=os.environ)
+        print(f"\n🎬 Запуск команды: {' '.join(cmd)}")
+        proc = subprocess.run(cmd, env=os.environ)
+        proc_returncode = proc.returncode
+        twitch_work = working_dir / "twitch_work"
+        if twitch_work.exists():
+            for vod_ws in twitch_work.iterdir():
+                if vod_ws.is_dir():
+                    _cleanup_vod_intermediates(vod_ws)
 
     long_ready_dir = working_dir / "long_ready"
     ready_dir = working_dir / "ready"
@@ -208,11 +267,11 @@ def main():
         upload_ok = (ur.returncode == 0)
 
     status_line = "✅ Опубликованы на YouTube в отложенное расписание!" if upload_ok else "⚠ Нарезка выполнена (проверьте статус выгрузки на YouTube)."
-    if proc.returncode != 0 and not long_mp4s and not short_mp4s:
+    if proc_returncode != 0 and not long_mp4s and not short_mp4s:
         notify_telegram(
             f"❌ **Ошибка на сервере Kaggle ({brand}) при обработке стрима!**\n"
             f"🎬 Стрим: {url}\n"
-            f"Код выхода: `{proc.returncode}`"
+            f"Код выхода: `{proc_returncode}`"
         )
     else:
         notify_telegram(
