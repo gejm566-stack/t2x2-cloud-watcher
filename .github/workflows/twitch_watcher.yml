@@ -32,7 +32,8 @@ jobs:
       - name: Install Kaggle CLI/API
         run: |
           python -m pip install --upgrade pip
-          pip install kaggle
+          pip install -r requirements.txt
+          python -c "from kaggle.api.kaggle_api_extended import KaggleApi; from kaggle.models.upload_file import UploadFile; KaggleApi()"
 
       - name: Restore bot state cache
         uses: actions/cache@v4
