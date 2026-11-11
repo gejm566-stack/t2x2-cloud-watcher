@@ -20,6 +20,7 @@ CHAT_ID = int(os.environ.get("TELEGRAM_CHAT_ID") or (_RAW_CHAT_ID if _RAW_CHAT_I
 # Параметры текущей задачи (автоматически обновляются ботом перед запуском)
 TASK_CONFIG = {
     "url": "https://www.twitch.tv/videos/2924895000",
+    "profile": "t2x2",
     "mode": "both",
     "interval_minutes": 30,
     "auto_upload": True,
@@ -77,17 +78,24 @@ def ensure_ai_models(working_dir: Path):
 
 
 def main():
-    print("=" * 70)
-    print("🎬 T2X2 CLIPS STUDIO — KAGGLE CLOUD GPU RUNNER")
-    print("=" * 70)
-
     url = TASK_CONFIG.get("url")
+    profile = str(TASK_CONFIG.get("profile", "t2x2") or "t2x2").strip().lower()
+    if profile not in ("t2x2", "5opka"):
+        profile = "t2x2"
+    brand = "5opka CLIPS" if profile == "5opka" else "T2x2 CLIPS"
     mode = TASK_CONFIG.get("mode", "both")
     interval = int(TASK_CONFIG.get("interval_minutes", 30))
     auto_upload = bool(TASK_CONFIG.get("auto_upload", True))
 
-    print(f"🎯 Стрим: {url}")
-    print(f"⚙️ Режим: {mode}")
+    os.environ["STUDIO_PROFILE"] = profile
+    if profile == "5opka":
+        os.environ["SKIP_INTRO"] = "1"
+
+    print("=" * 70)
+    print(f"🎬 {brand.upper()} STUDIO — KAGGLE CLOUD GPU RUNNER")
+    print("=" * 70)
+    print(f"🎯 Стрим ({brand}): {url}")
+    print(f"⚙️ Режим: {mode} | Профиль: {profile}")
 
     if not check_internet():
         err_msg = (
@@ -100,11 +108,11 @@ def main():
         return
 
     notify_telegram(
-        f"🚀 **Облачный GPU-сервер Kaggle запущен!**\n\n"
+        f"🚀 **Облачный GPU-сервер Kaggle запущен ({brand})!**\n\n"
         f"🎬 Стрим: {url}\n"
-        f"⚙️ Режим: `{mode}`\n"
+        f"⚙️ Режим: `{mode}` | Канал: **{brand}**\n"
         f"⚡ Видеокарта: NVIDIA Tesla T4 (16 ГБ)\n"
-        f"⏳ Начинаю скачивание и нарезку в 1080p60 (без спонсорки и без субтитров)..."
+        f"⏳ Начинаю скачивание и нарезку в 1080p60 (без субтитров)..."
     )
 
     working_dir = Path("/kaggle/working/studio")
@@ -191,23 +199,24 @@ def main():
         src_mode = "ready" if mode == "shorts" else ("long_ready" if mode in ("full", "long") else "both")
         u_cmd = [
             sys.executable, "youtube_api_uploader.py",
+            "--profile", profile,
             "--source", src_mode,
             "--interval-minutes", str(interval),
             "--max-uploads", "25",
         ]
-        ur = subprocess.run(u_cmd)
+        ur = subprocess.run(u_cmd, env=os.environ)
         upload_ok = (ur.returncode == 0)
 
     status_line = "✅ Опубликованы на YouTube в отложенное расписание!" if upload_ok else "⚠ Нарезка выполнена (проверьте статус выгрузки на YouTube)."
     if proc.returncode != 0 and not long_mp4s and not short_mp4s:
         notify_telegram(
-            f"❌ **Ошибка на сервере Kaggle при обработке стрима!**\n"
+            f"❌ **Ошибка на сервере Kaggle ({brand}) при обработке стрима!**\n"
             f"🎬 Стрим: {url}\n"
             f"Код выхода: `{proc.returncode}`"
         )
     else:
         notify_telegram(
-            f"🎉 **НАРЕЗКА И ВЫГРУЗКА ЗАВЕРШЕНЫ!**\n\n"
+            f"🎉 **НАРЕЗКА И ВЫГРУЗКА ЗАВЕРШЕНЫ ({brand})!**\n\n"
             f"🎬 Стрим: {url}\n"
             f"🎬 Длинных выпусков: **{len(long_mp4s)}**\n"
             f"📱 Shorts 9:16: **{len(short_mp4s)}**\n"
