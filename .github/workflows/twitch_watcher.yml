@@ -11,6 +11,10 @@ on:
         description: 'Принудительно запустить нарезку последнего VOD сейчас'
         required: false
         default: 'false'
+      force_channel:
+        description: 'Канал для принудительного запуска (t2x2 или 5opka)'
+        required: false
+        default: 't2x2'
 
 concurrency:
   group: t2x2-twitch-watcher
@@ -48,7 +52,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
-          STREAMER_CHANNEL: t2x2
+          STREAMER_CHANNELS: t2x2,5opka
           KAGGLE_KERNEL_ID: istfarmen/t2x2-clips-processor
           KAGGLE_DATASET_ID: istfarmen/t2x2-clips-bundle
           AUTO_START: 'true'
@@ -56,8 +60,9 @@ jobs:
           INTERVAL_MINUTES: '30'
           AUTO_UPLOAD: 'true'
           STATE_FILE: bot_state.json
+          INPUT_FORCE_CHANNEL: ${{ github.event.inputs.force_channel || 't2x2' }}
         run: |
           python cloud_watcher.py --once --state-file bot_state.json
           if [ "${{ github.event.inputs.force_run_latest }}" = "true" ]; then
-            python -c "import cloud_watcher as cw; s=cw.load_state(); st=cw.load_secrets_and_settings(s); print(cw.handle_telegram_command_text('/run', s, st)); cw.save_state(s)"
+            python -c "import os, cloud_watcher as cw; s=cw.load_state(); st=cw.load_secrets_and_settings(s); ch=os.environ.get('INPUT_FORCE_CHANNEL','t2x2'); print(cw.handle_telegram_command_text(f'/run_{ch}', s, st)); cw.save_state(s)"
           fi
