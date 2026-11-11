@@ -1,0 +1,62 @@
+name: 24/7 Twitch -> Telegram -> Kaggle Watcher
+
+on:
+  schedule:
+    # На публичном репозитории можно поставить '*/5 * * * *' (бесплатно и безлимитно).
+    # На приватном репозитории '*/25 * * * *' укладывается в бесплатный лимит 2000 минут/месяц.
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      force_run_latest:
+        description: 'Принудительно запустить нарезку последнего VOD сейчас'
+        required: false
+        default: 'false'
+
+concurrency:
+  group: t2x2-twitch-watcher
+  cancel-in-progress: false
+
+jobs:
+  watch-twitch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Kaggle CLI/API
+        run: |
+          python -m pip install --upgrade pip
+          pip install kaggle
+
+      - name: Restore bot state cache
+        uses: actions/cache@v4
+        with:
+          path: bot_state.json
+          key: t2x2-bot-state-${{ github.run_id }}
+          restore-keys: |
+            t2x2-bot-state-
+
+      - name: Run 24/7 Twitch watcher tick
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+          STREAMER_CHANNEL: t2x2
+          KAGGLE_KERNEL_ID: istfarmen/t2x2-clips-processor
+          KAGGLE_DATASET_ID: istfarmen/t2x2-clips-bundle
+          AUTO_START: 'true'
+          AUTO_MODE: 'both'
+          INTERVAL_MINUTES: '30'
+          AUTO_UPLOAD: 'true'
+          STATE_FILE: bot_state.json
+        run: |
+          python cloud_watcher.py --once --state-file bot_state.json
+          if [ "${{ github.event.inputs.force_run_latest }}" = "true" ]; then
+            python -c "import cloud_watcher as cw; s=cw.load_state(); st=cw.load_secrets_and_settings(s); print(cw.handle_telegram_command_text('/run', s, st)); cw.save_state(s)"
+          fi
