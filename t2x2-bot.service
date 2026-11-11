@@ -1,0 +1,17 @@
+[Unit]
+Description=T2x2 24/7 Twitch -> Telegram -> Kaggle GPU Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/t2x2_bot
+EnvironmentFile=/opt/t2x2_bot/.env
+ExecStart=/opt/t2x2_bot/venv/bin/python /opt/t2x2_bot/telegram_bot.py
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
