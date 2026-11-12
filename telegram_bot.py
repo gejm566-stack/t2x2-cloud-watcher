@@ -120,6 +120,14 @@ def _launch_from_bot(
             ch_state["pending_vod_id"] = ""
             cw._remove_pending_job(cfg, vod_id)
             cfg.setdefault("vod_channels", {})[vod_id] = ch
+            cw._record_active_kaggle_job(
+                cfg,
+                vod_id=vod_id,
+                channel=ch,
+                brand=str(meta.get("brand") or meta.get("display") or ch),
+                mode=mode,
+                url=vod_url,
+            )
             save_config(cfg)
     return ok, msg
 
