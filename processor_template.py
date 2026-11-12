@@ -37,16 +37,27 @@ AI_MODEL_URLS = [
 def notify_telegram(text: str):
     if not BOT_TOKEN or not CHAT_ID:
         return
-    try:
-        payload = json.dumps({"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}).encode("utf-8")
-        req = urllib.request.Request(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-        )
-        urllib.request.urlopen(req, timeout=15)
-    except Exception as e:
-        print(f"Telegram notify error: {e}")
+    for use_md in (True, False):
+        try:
+            body = {"chat_id": CHAT_ID, "text": text, "disable_web_page_preview": True}
+            if use_md:
+                body["parse_mode"] = "Markdown"
+            payload = json.dumps(body).encode("utf-8")
+            req = urllib.request.Request(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+            )
+            urllib.request.urlopen(req, timeout=15)
+            return
+        except urllib.error.HTTPError as he:
+            if use_md and he.code == 400:
+                continue
+            print(f"Telegram notify error ({he.code}): {he}")
+            return
+        except Exception as e:
+            print(f"Telegram notify error: {e}")
+            return
 
 
 def check_internet() -> bool:
@@ -182,14 +193,21 @@ def main():
     def _cleanup_vod_intermediates(vod_ws: Path) -> None:
         if not vod_ws.exists():
             return
-        for pat in ("vod*", "audio*"):
-            for fp in vod_ws.glob(pat):
-                if fp.is_file():
-                    fp.unlink(missing_ok=True)
-        for sub in ("shorts/raw", "shorts/final", "shorts/subtitled", "long_blocks", "long_cuts"):
+        for scan_dir in (vod_ws, vod_ws / "analysis"):
+            if not scan_dir.exists():
+                continue
+            for pat in ("vod*", "audio*", "temp_whisper*"):
+                for fp in scan_dir.glob(pat):
+                    if fp.is_file():
+                        fp.unlink(missing_ok=True)
+        for sub in ("shorts/raw", "shorts/final", "shorts/effects", "shorts/subtitled", "shorts/metadata", "long_blocks", "long_cuts"):
             d = vod_ws / sub
             if d.exists():
                 shutil.rmtree(d, ignore_errors=True)
+        for root_sub in ("long_blocks", "long_cuts"):
+            d_root = working_dir / root_sub
+            if d_root.exists():
+                shutil.rmtree(d_root, ignore_errors=True)
 
     url_list = [u.strip() for u in re.split(r"[\s,;]+", str(url or "")) if u.strip()] or [str(url)]
     proc_returncode = 0
@@ -209,11 +227,10 @@ def main():
                 "--url", cur_url,
                 "--interval-minutes", str(interval),
                 "--skip-subtitles",
+                "--skip-vision",
                 "--min-score", "6.5",
                 "--max-clips", "15",
             ]
-            if len(url_list) > 1:
-                cmd.append("--skip-vision")
 
             print(f"\n🎬 [{idx}/{len(url_list)}] Запуск команды: {' '.join(cmd)}")
             cur_proc = subprocess.run(cmd, env=os.environ)
@@ -252,6 +269,8 @@ def main():
     short_mp4s = sorted(ready_dir.glob("*.mp4")) if ready_dir.exists() else []
     print(f"\n📦 Готово длинных роликов (long_ready): {len(long_mp4s)}, Shorts (ready): {len(short_mp4s)}")
 
+    max_uploads = int(TASK_CONFIG.get("max_uploads", 12) or 12)
+    upload_report = {}
     upload_ok = False
     if auto_upload and (long_mp4s or short_mp4s):
         print("\n🚀 ВЫГРУЗКА НА YOUTUBE ПО РАСПИСАНИЮ...")
@@ -261,24 +280,69 @@ def main():
             "--profile", profile,
             "--source", src_mode,
             "--interval-minutes", str(interval),
-            "--max-uploads", "25",
+            "--max-uploads", str(max_uploads),
         ]
         ur = subprocess.run(u_cmd, env=os.environ)
-        upload_ok = (ur.returncode == 0)
+        report_file = working_dir / "publisher" / "last_upload_report.json"
+        if report_file.exists():
+            try:
+                upload_report = json.loads(report_file.read_text(encoding="utf-8"))
+            except Exception:
+                upload_report = {}
+        u_cnt = int(upload_report.get("uploaded_count", 0) or 0)
+        upload_ok = (ur.returncode == 0 and u_cnt > 0)
 
-    status_line = "✅ Опубликованы на YouTube в отложенное расписание!" if upload_ok else "⚠ Нарезка выполнена (проверьте статус выгрузки на YouTube)."
+    if not auto_upload:
+        status_line = "🧪 Тестовый режим (auto_upload=False): выгрузка на YouTube отключена."
+    elif not long_mp4s and not short_mp4s:
+        status_line = "⚠️ Готовых роликов для выгрузки не создано."
+    else:
+        u_cnt = int(upload_report.get("uploaded_count", 0) or 0)
+        u_long = int(upload_report.get("uploaded_long_count", 0) or 0)
+        u_short = int(upload_report.get("uploaded_shorts_count", 0) or 0)
+        skipped_18 = int(upload_report.get("skipped_18plus_count", 0) or 0)
+        limit_hit = bool(upload_report.get("limit_hit"))
+        errs = upload_report.get("errors") or []
+        uploaded_items = upload_report.get("uploaded") or []
+        links_block = ""
+        if uploaded_items:
+            sample_links = "\n".join(
+                f"• {it.get('url')} — {str(it.get('title') or '')[:50]}"
+                for it in uploaded_items[:6]
+            )
+            links_block = f"\n\n🔗 Ссылки (в отложке):\n{sample_links}"
+        guard_note = f"\n🛡 Отключено 18+ фильтром: {skipped_18} Shorts" if skipped_18 > 0 else ""
+
+        if u_cnt > 0 and not errs and not limit_hit:
+            status_line = f"✅ Выложено на YouTube: {u_cnt} (длинных: {u_long}, Shorts: {u_short}){guard_note}{links_block}"
+        elif u_cnt > 0:
+            reason_txt = "YouTube достиг дневного лимита загрузок" if limit_hit else str(errs[0])[:160]
+            status_line = f"⚠️ Выгружено частично: {u_cnt} видео (остальные остановлены: {reason_txt}){guard_note}{links_block}"
+        elif skipped_18 > 0 and not errs and int(upload_report.get("attempted", 0) or 0) == 0:
+            status_line = f"⚠️ Новые Shorts не выложены — все {skipped_18} отфильтрованы защитой 18+."
+        elif not upload_report and upload_ok:
+            status_line = "✅ Выгрузка выполнена."
+        else:
+            err_preview = (
+                "YouTube отклонил из-за дневного лимита загрузок (uploadLimitExceeded)"
+                if limit_hit
+                else (str(errs[0])[:220] if errs else f"код выхода {ur.returncode if auto_upload else proc_returncode}")
+            )
+            status_line = f"❌ НА YOUTUBE НИЧЕГО НЕ ВЫЛОЖЕНО!\nПричина: {err_preview}{guard_note}"
+
     if proc_returncode != 0 and not long_mp4s and not short_mp4s:
         notify_telegram(
-            f"❌ **Ошибка на сервере Kaggle ({brand}) при обработке стрима!**\n"
+            f"❌ Ошибка на сервере Kaggle ({brand}) при обработке стрима!\n"
             f"🎬 Стрим: {url}\n"
-            f"Код выхода: `{proc_returncode}`"
+            f"Код выхода: {proc_returncode}"
         )
     else:
+        hdr = "🎉 НАРЕЗКА И ВЫГРУЗКА ЗАВЕРШЕНЫ" if (not auto_upload or upload_ok) else "⚠️ НАРЕЗКА ГОТОВА, НО ЕСТЬ ПРОБЛЕМА С ВЫГРУЗКОЙ"
         notify_telegram(
-            f"🎉 **НАРЕЗКА И ВЫГРУЗКА ЗАВЕРШЕНЫ ({brand})!**\n\n"
+            f"{hdr} ({brand})!\n\n"
             f"🎬 Стрим: {url}\n"
-            f"🎬 Длинных выпусков: **{len(long_mp4s)}**\n"
-            f"📱 Shorts 9:16: **{len(short_mp4s)}**\n"
+            f"🎬 Длинных выпусков: {len(long_mp4s)}\n"
+            f"📱 Безопасных Shorts 9:16: {len(short_mp4s)}\n"
             f"{status_line}\n\n"
             f"💤 Облачный GPU-сервер Kaggle завершил работу."
         )
