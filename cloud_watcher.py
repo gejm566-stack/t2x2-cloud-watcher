@@ -102,6 +102,7 @@ def _make_default_state() -> dict:
         "last_dispatched_at": "",
         "channels": {},
         "pending_jobs": [],
+        "active_kaggle_job": None,
         "vod_channels": {},
         "wait_exclude_channel": "",
         "update_offset": 0,
@@ -206,6 +207,7 @@ def load_state(state_path: Path = None) -> dict:
                 data.update(raw)
                 data["channels"] = dict(raw_channels) if isinstance(raw_channels, dict) else {}
                 data["pending_jobs"] = list(raw.get("pending_jobs") or []) if isinstance(raw.get("pending_jobs"), list) else []
+                data["active_kaggle_job"] = raw.get("active_kaggle_job") if isinstance(raw.get("active_kaggle_job"), dict) else None
                 data["vod_channels"] = dict(raw.get("vod_channels") or {}) if isinstance(raw.get("vod_channels"), dict) else {}
         except Exception as e:
             print(f"[State] Не удалось прочитать {path}: {e}", file=sys.stderr)
@@ -815,6 +817,27 @@ def _enqueue_pending_job(
     return True
 
 
+def _record_active_kaggle_job(
+    state: dict,
+    vod_id: str,
+    channel: str,
+    brand: str,
+    mode: str,
+    url: str,
+) -> dict:
+    """Сохраняет метаданные текущей активной Kaggle-задачи для отслеживания сбоев и /status."""
+    job = {
+        "vod_id": str(vod_id),
+        "channel": normalize_channel(channel),
+        "brand": str(brand or channel),
+        "mode": str(mode or "both"),
+        "url": str(url or f"https://www.twitch.tv/videos/{vod_id}"),
+        "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    state["active_kaggle_job"] = job
+    return job
+
+
 def _launch_or_queue_job(
     vod_url: str,
     vod_id: str,
@@ -886,6 +909,15 @@ def _launch_or_queue_job(
             ch_state["waiting_for_vod_finalize"] = False
             ch_state["stream_end_notified"] = False
             _remove_pending_job(state, vid)
+            ch_key = normalize_channel(meta.get("profile") or settings.get("channel") or "t2x2")
+            _record_active_kaggle_job(
+                state,
+                vod_id=vid,
+                channel=ch_key,
+                brand=str(meta.get("brand") or meta.get("display") or ch_key),
+                mode=use_mode,
+                url=vod_url,
+            )
         return True, "launched", launch_msg
     return False, "error", launch_msg
 
@@ -936,11 +968,23 @@ def _format_status_text(twitch_data: dict, state: dict, settings: dict) -> str:
     queue_line = f"⏳ В очереди Kaggle: {len(queue)} шт." if queue else "⏳ В очереди Kaggle: пусто"
     channels_label = ", ".join(per_channel.keys()) or settings["channel"]
 
+    active_line = ""
+    active_job = state.get("active_kaggle_job")
+    if (
+        isinstance(active_job, dict)
+        and active_job.get("vod_id")
+        and str(k_stat.get("status") or "").upper() in ("RUNNING", "QUEUED")
+    ):
+        aj_brand = active_job.get("brand") or active_job.get("channel") or ""
+        aj_mode = _describe_mode(active_job.get("mode") or "")
+        active_line = f"🎬 Сейчас в работе: {aj_brand} VOD {active_job.get('vod_id')} ({aj_mode})\n"
+
     return (
         f"📡 Статус наблюдателя 24/7 ({channels_label})\n\n"
         + "\n\n".join(blocks)
         + "\n\n"
         + f"🖥 Kaggle GPU ({settings['kernel_id']}): {k_stat.get('status', 'UNKNOWN')}\n"
+        + active_line
         + f"🤖 Мониторинг: {'ВКЛ' if state.get('monitoring_enabled', True) else 'ВЫКЛ'} | "
         + f"Режим: {_describe_mode(settings['auto_mode'])}\n"
         + queue_line
@@ -1328,14 +1372,57 @@ def _dispatch_vod(
     return False
 
 
-def _drain_pending_jobs(state: dict, settings: dict, dry_run: bool = False) -> dict | None:
+def _check_active_kaggle_job(state: dict, settings: dict, dry_run: bool = False) -> dict | None:
+    """Проверяет статус активной Kaggle-задачи и уведомляет Telegram при ERROR / CANCELLED."""
+    job = state.get("active_kaggle_job")
+    if dry_run or not isinstance(job, dict) or not job.get("vod_id"):
+        return None
+
+    kstat = get_kaggle_kernel_status(settings["kernel_id"], settings["kaggle_token"])
+    status = str(kstat.get("status") or "").upper()
+    if status == "COMPLETE":
+        state["active_kaggle_job"] = None
+        return kstat
+
+    if status in ("ERROR", "CANCEL_ACKNOWLEDGED", "CANCELLED"):
+        state["active_kaggle_job"] = None
+        brand = job.get("brand") or job.get("channel") or ""
+        vid = job.get("vod_id") or ""
+        url = job.get("url") or f"https://www.twitch.tv/videos/{vid}"
+        mode_desc = _describe_mode(job.get("mode") or "")
+        fail_msg = str(kstat.get("failure_message") or "").strip()
+        if status == "ERROR":
+            header = f"❌ Kaggle GPU завершился с ошибкой ({brand})!"
+        else:
+            header = f"⚠️ Задача на Kaggle GPU была остановлена/отменена ({brand})!"
+        details = f"\n🧾 Причина Kaggle: {fail_msg[:400]}" if fail_msg else ""
+        text = (
+            f"{header}\n\n"
+            f"🎬 VOD: {url}\n"
+            f"⚙️ Режим: {mode_desc}\n"
+            f"📊 Статус Kaggle: {status}{details}\n\n"
+            f"Повторно запустить нарезку можно, отправив ссылку на VOD или команду /run."
+        )
+        if settings.get("bot_token") and settings.get("chat_id"):
+            tg_send(settings["bot_token"], settings["chat_id"], text)
+        return kstat
+
+    return kstat
+
+
+def _drain_pending_jobs(
+    state: dict,
+    settings: dict,
+    dry_run: bool = False,
+    pre_kstat: dict = None,
+) -> dict | None:
     """Если в очереди pending_jobs есть отложенные задачи и Kaggle свободен — запускает следующую."""
     jobs = state.get("pending_jobs") or []
     if not jobs:
         return None
 
     if not dry_run:
-        kstat = get_kaggle_kernel_status(settings["kernel_id"], settings["kaggle_token"])
+        kstat = pre_kstat or get_kaggle_kernel_status(settings["kernel_id"], settings["kaggle_token"])
         if kstat.get("status") in ("RUNNING", "QUEUED"):
             return None
 
@@ -1369,6 +1456,23 @@ def _drain_pending_jobs(state: dict, settings: dict, dry_run: bool = False) -> d
         ch_state["pending_vod_id"] = ""
         ch_state["waiting_for_vod_finalize"] = False
         ch_state["stream_end_notified"] = False
+        if not dry_run:
+            launched_job = next((j for j in jobs if str(j.get("vod_id")) == str(vod_id)), {})
+            job_ch = normalize_channel(
+                launched_job.get("channel")
+                or (state.get("vod_channels") or {}).get(str(vod_id))
+                or settings.get("channel")
+                or "t2x2"
+            )
+            job_meta = get_channel_meta(job_ch)
+            _record_active_kaggle_job(
+                state,
+                vod_id=vod_id,
+                channel=job_ch,
+                brand=str(job_meta.get("brand") or job_meta.get("display") or job_ch),
+                mode=str(launched_job.get("mode") or settings.get("auto_mode") or "both"),
+                url=str(launched_job.get("url") or launched_job.get("vod_url") or f"https://www.twitch.tv/videos/{vod_id}"),
+            )
         tg_send(
             settings["bot_token"],
             settings["chat_id"],
@@ -1541,7 +1645,8 @@ def process_tick(state: dict, settings: dict, twitch: dict = None, dry_run: bool
     if not state.get("monitoring_enabled", True):
         return {"action": "monitoring_paused"}
 
-    queued_result = _drain_pending_jobs(state, settings, dry_run=dry_run)
+    active_kstat = _check_active_kaggle_job(state, settings, dry_run=dry_run)
+    queued_result = _drain_pending_jobs(state, settings, dry_run=dry_run, pre_kstat=active_kstat)
     dispatched_this_tick = bool(queued_result)
 
     # Обратная совместимость: одиночный twitch dict против словаря {channel: twitch_dict}
