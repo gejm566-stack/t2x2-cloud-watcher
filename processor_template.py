@@ -222,6 +222,7 @@ def main():
             if len(url_list) > 1:
                 notify_telegram(f"🎬 [{idx}/{len(url_list)}] Нарезаю Shorts ({brand}): {cur_url}")
 
+            max_clips_val = max(1, int(TASK_CONFIG.get("max_clips") or 15))
             cmd = [
                 sys.executable, "pipeline_shorts.py",
                 "--url", cur_url,
@@ -229,7 +230,7 @@ def main():
                 "--with-subtitles",
                 "--skip-vision",
                 "--min-score", "6.5",
-                "--max-clips", "15",
+                "--max-clips", str(max_clips_val),
             ]
 
             print(f"\n🎬 [{idx}/{len(url_list)}] Запуск команды: {' '.join(cmd)}")
