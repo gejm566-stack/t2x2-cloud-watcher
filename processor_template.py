@@ -123,7 +123,7 @@ def main():
         f"🎬 Стрим: {url}\n"
         f"⚙️ Режим: `{mode}` | Канал: **{brand}**\n"
         f"⚡ Видеокарта: NVIDIA Tesla T4 (16 ГБ)\n"
-        f"⏳ Начинаю скачивание и нарезку в 1080p60 (без субтитров)..."
+        f"⏳ Начинаю скачивание и нарезку в 1080p60 (свет вебки + музыка + умные субтитры)..."
     )
 
     working_dir = Path("/kaggle/working/studio")
@@ -226,7 +226,7 @@ def main():
                 sys.executable, "pipeline_shorts.py",
                 "--url", cur_url,
                 "--interval-minutes", str(interval),
-                "--skip-subtitles",
+                "--with-subtitles",
                 "--skip-vision",
                 "--min-score", "6.5",
                 "--max-clips", "15",
